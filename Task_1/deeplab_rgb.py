@@ -2,17 +2,17 @@
 # Adapted from EGH444_Assessment2_Template.py using TorchVision.
 # Depth is not used in this part of the project.
 #
-# Run these commands from the repo root, with this file inside task1/.
+# Run these commands from the repo root, with this file inside Task_1/.
 # Keep NYUDepthv2 beside the repo, or give --data-root its location.
 # The dataset needs RGB/, Label/, train.txt and test.txt.
-# Install task1/requirements.txt in the Python environment first.
+# Install Task_1/requirements.txt in the Python environment first.
 # Activate the environment on macOS/Linux: source .venv/bin/activate
 #
 # Train:
-# python task1/deeplab_rgb.py --data-root ../NYUDepthv2 --run-name baseline
+# python Task_1/deeplab_rgb.py --data-root ../NYUDepthv2 --run-name baseline
 #
 # Evaluate (put the whole command on one line):
-# python task1/deeplab_rgb.py --data-root ../NYUDepthv2 --evaluate-checkpoint
+# python Task_1/deeplab_rgb.py --data-root ../NYUDepthv2 --evaluate-checkpoint
 # runs/deeplab/baseline/deeplabv3/best.pt --run-name final
 # Add --validation-only to skip testing.
 #
