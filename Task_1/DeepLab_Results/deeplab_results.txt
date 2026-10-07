@@ -1,0 +1,116 @@
+DeepLabV3 RGB results
+
+Run: results-text-check
+Checkpoint: deeplab-full-corrected/deeplabv3/best.pt
+Model: DeepLabV3 with a ResNet50 backbone; RGB only, 40 classes.
+Image size: 120 x 160 (height x width)
+Seed: 42; device: mps
+Split sizes: train=636, val=159, test=654
+
+Training settings:
+Epoch budget: 12; batch size: 2
+Head learning rate: 0.001; backbone multiplier: 0.1
+Trainable backbone: last-stage; schedule: poly
+Pretrained backbone: True
+Loss: cross-entropy; augmentation: random horizontal flips (50%).
+
+Measured results:
+val: mIoU 29.05%; pixel accuracy 61.92%; Dice/F1 42.35%
+Approximate inference time: 60.84 ms/image (no dedicated warm-up).
+Prediction images and per-image scores: prediction_examples/val
+Class-wise IoU (mapped IDs 0-39):
+  Class 0: 65.60%
+  Class 1: 71.35%
+  Class 2: 52.96%
+  Class 3: 59.65%
+  Class 4: 37.45%
+  Class 5: 37.93%
+  Class 6: 27.67%
+  Class 7: 20.08%
+  Class 8: 34.64%
+  Class 9: 50.06%
+  Class 10: 36.90%
+  Class 11: 40.44%
+  Class 12: 25.44%
+  Class 13: 19.00%
+  Class 14: 24.08%
+  Class 15: 27.21%
+  Class 16: 33.70%
+  Class 17: 21.33%
+  Class 18: 26.91%
+  Class 19: 19.13%
+  Class 20: 6.81%
+  Class 21: 65.39%
+  Class 22: 9.65%
+  Class 23: 8.88%
+  Class 24: 43.72%
+  Class 25: 8.75%
+  Class 26: 8.44%
+  Class 27: 25.53%
+  Class 28: 1.31%
+  Class 29: 34.71%
+  Class 30: 23.11%
+  Class 31: 12.94%
+  Class 32: 40.72%
+  Class 33: 29.20%
+  Class 34: 20.72%
+  Class 35: 26.34%
+  Class 36: 0.00%
+  Class 37: 26.00%
+  Class 38: 12.50%
+  Class 39: 25.94%
+test: mIoU 25.99%; pixel accuracy 57.35%; Dice/F1 38.99%
+Approximate inference time: 61.54 ms/image (no dedicated warm-up).
+Prediction images and per-image scores: prediction_examples/test
+Class-wise IoU (mapped IDs 0-39):
+  Class 0: 61.27%
+  Class 1: 65.05%
+  Class 2: 43.01%
+  Class 3: 51.15%
+  Class 4: 34.75%
+  Class 5: 38.46%
+  Class 6: 20.24%
+  Class 7: 23.37%
+  Class 8: 34.72%
+  Class 9: 34.77%
+  Class 10: 39.79%
+  Class 11: 30.10%
+  Class 12: 36.75%
+  Class 13: 13.05%
+  Class 14: 7.74%
+  Class 15: 35.78%
+  Class 16: 32.05%
+  Class 17: 21.41%
+  Class 18: 20.37%
+  Class 19: 14.47%
+  Class 20: 6.26%
+  Class 21: 48.51%
+  Class 22: 20.08%
+  Class 23: 21.15%
+  Class 24: 29.35%
+  Class 25: 11.19%
+  Class 26: 11.88%
+  Class 27: 24.55%
+  Class 28: 1.85%
+  Class 29: 13.83%
+  Class 30: 34.26%
+  Class 31: 22.35%
+  Class 32: 41.99%
+  Class 33: 28.74%
+  Class 34: 11.87%
+  Class 35: 11.47%
+  Class 36: 0.59%
+  Class 37: 13.24%
+  Class 38: 6.46%
+  Class 39: 21.76%
+
+Reading the outputs:
+PNG panels: RGB | correct labels | prediction | errors in red.
+Images are initial examples, not a complete failure analysis. Use per_image.csv to find weaker cases.
+Unlabeled pixels are ignored. Metrics use the resized masks.
+These scores are from one seed; compare methods using the same splits and evaluation size.
+
+Ideas for Task 2 (hypotheses to test, not proven improvements):
+- Higher image resolution may help small objects; measure the extra time and memory.
+- Class weighting or a combined loss may help weaker classes; check class-wise scores.
+Test one change at a time against the baseline and select changes using validation results.

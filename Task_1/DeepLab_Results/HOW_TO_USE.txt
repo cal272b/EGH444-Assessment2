@@ -1,0 +1,24 @@
+DeepLab Task 1 handover
+
+Drop this DeepLab_Results folder into Task_1 beside deeplab_rgb.py.
+Read deeplab_results.txt for settings and scores.
+Open prediction_examples/val or prediction_examples/test for PNG examples.
+Panels: original RGB | correct labels | prediction | errors in red.
+The examples are initial samples, not a curated failure study.
+
+To evaluate the saved model, run from the Git repo root:
+python Task_1/deeplab_rgb.py --data-root ../NYUDepthv2 --evaluate-checkpoint Task_1/DeepLab_Results/deeplab-full-corrected/deeplabv3/best.pt --validation-only --output-root ../Task1_Results
+
+Activate your Python environment first and install the required packages.
+Replace ../NYUDepthv2 with your own dataset location.
+The dataset needs RGB/, Label/, train.txt and test.txt.
+Keep best.pt in its current folder so the script can find splits.json.
+The saved config.json records the original training setup and laptop paths;
+the command above supplies the dataset location to use on your computer.
+
+For Task 2, keep this baseline and test changes in separate training runs.
+Use matching splits and evaluation size for fair comparisons.
+
+The weights are about 152 MiB and exceed GitHub normal Git file limits.
+This folder includes a .gitignore that excludes best.pt from normal commits.
+Share the whole folder separately to give teammates the weights as well.

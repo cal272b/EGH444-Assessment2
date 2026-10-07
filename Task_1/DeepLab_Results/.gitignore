@@ -1,0 +1,3 @@
+# Share the large trained weights separately; keep them out of normal Git commits.
+*.pt
+.DS_Store

@@ -1,0 +1,33 @@
+{
+  "data_root": "/Users/dylan/Desktop/GroupProject/NYUDepthv2",
+  "label_scheme": "one-based",
+  "models": [
+    "deeplabv3"
+  ],
+  "pretrained": true,
+  "epochs": 12,
+  "batch_size": 2,
+  "size": [
+    120,
+    160
+  ],
+  "lr": 0.001,
+  "trainable_backbone": "last-stage",
+  "backbone_lr_factor": 0.1,
+  "schedule": "poly",
+  "patience": 4,
+  "resume": null,
+  "final_test": false,
+  "validation_only": false,
+  "evaluate_checkpoint": null,
+  "seed": 42,
+  "val_fraction": 0.2,
+  "device": "mps",
+  "limit": null,
+  "run_name": "deeplab-full-corrected",
+  "torch_version": "2.14.1",
+  "torchvision_version": "0.29.1",
+  "batchnorm_running_statistics": "backbone frozen; head trained except singleton batches",
+  "ignore_index": 255,
+  "metrics_note": "Macro averages exclude classes with zero union; values are fractions."
+}
