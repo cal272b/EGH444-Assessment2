@@ -225,6 +225,63 @@ def write_csv(path, rows):
             writer.writerows(rows)
 
 
+def write_results_text(run_dir, config, splits, results_dir, checkpoint, summary=None):
+    """Put the settings and results together for the group to read."""
+    def percentage(value):
+        return 'not available' if value is None else f'{100 * value:.2f}%'
+
+    lines = ['DeepLabV3 RGB results', '',
+             f'Run: {run_dir.name}', f'Checkpoint: {checkpoint}',
+             'Model: DeepLabV3 with a ResNet50 backbone; RGB only, 40 classes.',
+             f"Image size: {config['size'][0]} x {config['size'][1]} (height x width)",
+             f"Seed: {config['seed']}; device: {config['device']}",
+             'Split sizes: ' + ', '.join(f'{name}={len(ids)}' for name, ids in splits.items())]
+    # Evaluation settings may differ from the settings used to train the weights.
+    if config.get('evaluate_checkpoint'):
+        original = Path(checkpoint).parent.parent / 'config.json'
+        if original.is_file():
+            training_config = json.loads(original.read_text())
+        else:
+            training_config = None
+    else:
+        training_config = config
+    if training_config:
+        lines += ['', 'Training settings:',
+                  f"Epoch budget: {training_config.get('epochs')}; batch size: {training_config.get('batch_size')}",
+                  f"Head learning rate: {training_config.get('lr')}; backbone multiplier: {training_config.get('backbone_lr_factor')}",
+                  f"Trainable backbone: {training_config.get('trainable_backbone')}; schedule: {training_config.get('schedule')}",
+                  f"Pretrained backbone: {training_config.get('pretrained')}",
+                  'Loss: cross-entropy; augmentation: random horizontal flips (50%).']
+    else:
+        lines += ['', 'Original training config.json was unavailable; see the original run for training settings.']
+    if summary:
+        lines += [f"Best epoch: {summary['best_epoch']}",
+                  f"Training time: {summary['training_seconds'] / 60:.2f} minutes"]
+    lines += ['', 'Measured results:']
+    for split in ('val', 'test'):
+        folder = results_dir / split
+        metrics_file = folder / 'metrics.json'
+        if not metrics_file.is_file():
+            lines.append(f'{split}: not evaluated in this run.')
+            continue
+        scores = json.loads(metrics_file.read_text())
+        lines += [f"{split}: mIoU {percentage(scores['mIoU'])}; pixel accuracy {percentage(scores['PixelAcc'])}; Dice/F1 {percentage(scores['mean_Dice_F1'])}",
+                  f"Approximate inference time: {scores['inference_ms_per_image']:.2f} ms/image (no dedicated warm-up).",
+                  f'Prediction images and per-image scores: {folder.resolve()}',
+                  'Class-wise IoU (mapped IDs 0-39):']
+        lines += [f'  Class {i}: {percentage(value)}' for i, value in enumerate(scores['IoU_per_class'])]
+    lines += ['', 'Reading the outputs:',
+              'PNG panels: RGB | correct labels | prediction | errors in red.',
+              'Images are initial examples, not a complete failure analysis. Use per_image.csv to find weaker cases.',
+              'Unlabeled pixels are ignored. Metrics use the resized masks.',
+              'A limited-image run checks the pipeline only; it is not a full baseline result.' if config.get('limit') else 'These scores are from one seed; compare methods using the same splits and evaluation size.',
+              '', 'Ideas for Task 2 (hypotheses to test, not proven improvements):',
+              '- Higher image resolution may help small objects; measure the extra time and memory.',
+              '- Class weighting or a combined loss may help weaker classes; check class-wise scores.',
+              'Test one change at a time against the baseline and select changes using validation results.']
+    (run_dir / 'deeplab_results.txt').write_text('\n'.join(lines) + '\n')
+
+
 # Training
 
 def run_model(name, args, splits, device, run_dir):
@@ -421,9 +478,12 @@ def main():
             result = evaluate(model, loader, device, run_dir / split, visual_count=12)
             print(f"{split}: mIoU={result['mIoU']:.4f}, PixelAcc={result['PixelAcc']:.4f}", flush=True)
         print(f'Final evaluation saved: {run_dir}')
+        write_results_text(run_dir, config, splits, run_dir, args.evaluate_checkpoint)
         return
     summary = run_model('deeplabv3', args, splits, device, run_dir)
     write_csv(run_dir / 'summary.csv', [summary])
+    write_results_text(run_dir, config, splits, run_dir / 'deeplabv3',
+                       run_dir / 'deeplabv3' / 'best.pt', summary)
     print(f'Finished. Results: {run_dir}')
 
 
