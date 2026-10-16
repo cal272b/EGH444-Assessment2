@@ -143,14 +143,23 @@ class RGBDataset(Dataset):
 
 # Model and evaluation
 
-def build_model(name, pretrained):
-    """Set up DeepLabV3 or FCN (ResNet50) with 40 output classes."""
+def build_model(name, pretrained, aspp_rates=None):
+    """Set up DeepLabV3 or FCN (ResNet50) with 40 output classes.
+
+    aspp_rates replaces DeepLabV3's default atrous rates (12, 24, 36), which are
+    sized for ~513px inputs; at 120x160 the feature map is only 15x20.
+    """
     if name not in MODELS:
         raise ValueError(f'Unknown model {name}; choose from {list(MODELS)}')
     constructor = getattr(torchvision.models.segmentation, f'{name}_resnet50')
     # Stop if the weights fail to download instead of using random weights.
     model = constructor(weights=None, weights_backbone='IMAGENET1K_V1' if pretrained else None,
                         num_classes=CLASSES, aux_loss=False)
+    if aspp_rates:
+        if name != 'deeplabv3':
+            raise ValueError('--aspp-rates only applies to deeplabv3')
+        from torchvision.models.segmentation.deeplabv3 import DeepLabHead
+        model.classifier = DeepLabHead(2048, CLASSES, atrous_rates=tuple(aspp_rates))
     return model
 
 
@@ -335,7 +344,7 @@ def run_model(name, args, splits, device, run_dir):
         dataset = RGBDataset(args.data_root, stems, args.size, args.label_scheme, split == 'train')
         loaders[split] = DataLoader(dataset, batch_size=args.batch_size, shuffle=split == 'train',
                                     num_workers=0, generator=torch.Generator().manual_seed(args.seed))
-    model = build_model(name, args.pretrained).to(device)
+    model = build_model(name, args.pretrained, args.aspp_rates).to(device)
     if args.trainable_backbone == 'frozen':
         for parameter in model.backbone.parameters():
             parameter.requires_grad_(False)
@@ -403,7 +412,7 @@ def run_model(name, args, splits, device, run_dir):
             best = validation['mIoU']
             torch.save({'model_state': model.state_dict(), 'epoch': epoch, 'model': name, 'num_classes': CLASSES,
                         'label_scheme': args.label_scheme, 'size': args.size,
-                        'val_mIoU': best}, folder / 'best.pt')
+                        'val_mIoU': best, 'aspp_rates': args.aspp_rates}, folder / 'best.pt')
         else:
             stale += 1
         if scheduler:
@@ -447,6 +456,8 @@ def main():
     parser.add_argument('--backbone-lr-factor', type=float, default=0.1,
                         help='Multiplier on head LR for the pretrained backbone')
     parser.add_argument('--schedule', choices=['constant', 'poly'], default='poly')
+    parser.add_argument('--aspp-rates', type=int, nargs=3, metavar=('R1', 'R2', 'R3'),
+                        help='DeepLabV3 only: replace default atrous rates 12 24 36')
     parser.add_argument('--loss', choices=['ce', 'weighted-ce'], default='ce',
                         help='weighted-ce: cross-entropy with median-frequency class weights')
     parser.add_argument('--patience', type=int, default=4, help='Early stopping patience; 0 disables')
@@ -517,7 +528,7 @@ def main():
         if recorded_splits != splits:
             raise ValueError('Evaluation sample IDs differ from the selected training run. Use matching seed/data/limit.')
         model_name = checkpoint.get('model', 'deeplabv3')
-        model = build_model(model_name, False).to(device)
+        model = build_model(model_name, False, checkpoint.get('aspp_rates')).to(device)
         model.load_state_dict(checkpoint['model_state'])
         print(f'Evaluating {MODELS[model_name]} checkpoint (epoch {checkpoint.get("epoch")})', flush=True)
         for split in (('val',) if args.validation_only else ('val', 'test')):
