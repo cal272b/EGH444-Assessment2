@@ -1,13 +1,13 @@
 DeepLab Task 1 handover
 
-Drop this DeepLab_Results folder into Task_1 beside deeplab_rgb.py.
+Drop this DeepLab_Results folder into Task_1 beside rgb_segmentation.py (formerly deeplab_rgb.py).
 Read deeplab_results.txt for settings and scores.
 Open prediction_examples/val or prediction_examples/test for PNG examples.
 Panels: original RGB | correct labels | prediction | errors in red.
 The examples are initial samples, not a curated failure study.
 
 To evaluate the saved model, run from the Git repo root:
-python Task_1/deeplab_rgb.py --data-root ../NYUDepthv2 --evaluate-checkpoint Task_1/DeepLab_Results/deeplab-full-corrected/deeplabv3/best.pt --validation-only --output-root ../Task1_Results
+python Task_1/rgb_segmentation.py --data-root ../NYUDepthv2 --evaluate-checkpoint Task_1/DeepLab_Results/deeplab-full-corrected/deeplabv3/best.pt --validation-only --output-root ../Task1_Results
 
 Activate your Python environment first and install the required packages.
 Replace ../NYUDepthv2 with your own dataset location.

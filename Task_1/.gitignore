@@ -1,0 +1,5 @@
+# Training/evaluation outputs and weights are large; share best.pt via Drive.
+runs/
+*.pt
+.torch-cache/
+__pycache__/

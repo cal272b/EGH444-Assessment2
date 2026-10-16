@@ -1,19 +1,25 @@
-# EGH444 Task 1 - RGB-only DeepLabV3-ResNet50
+# EGH444 Task 1 - RGB-only baselines: DeepLabV3-ResNet50 and FCN-ResNet50
 # Adapted from EGH444_Assessment2_Template.py using TorchVision.
+# (Previously deeplab_rgb.py; FCN added so both baselines share one protocol.)
 # Depth is not used in this part of the project.
+#
+# Both models use the same dilated ResNet50 backbone (output stride 8), the same
+# splits, labels, resolution, optimiser and schedule. The only difference is the
+# head: FCN uses a single 3x3 conv head; DeepLabV3 uses ASPP (parallel atrous
+# convs + image pooling) for multi-scale context. This isolates the effect of
+# context modelling for the Task 1 comparison.
 #
 # Run these commands from the repo root, with this file inside Task_1/.
 # Keep NYUDepthv2 beside the repo, or give --data-root its location.
 # The dataset needs RGB/, Label/, train.txt and test.txt.
-# Install Task_1/requirements.txt in the Python environment first.
-# Activate the environment on macOS/Linux: source .venv/bin/activate
 #
 # Train:
-# python Task_1/deeplab_rgb.py --data-root ../NYUDepthv2 --run-name baseline
+# python Task_1/rgb_segmentation.py --data-root ../NYUDepthv2 --model deeplabv3 --run-name deeplab-baseline
+# python Task_1/rgb_segmentation.py --data-root ../NYUDepthv2 --model fcn --run-name fcn-baseline
 #
-# Evaluate (put the whole command on one line):
-# python Task_1/deeplab_rgb.py --data-root ../NYUDepthv2 --evaluate-checkpoint
-# runs/deeplab/baseline/deeplabv3/best.pt --run-name final
+# Evaluate (the model type is read from the checkpoint):
+# python Task_1/rgb_segmentation.py --data-root ../NYUDepthv2 --evaluate-checkpoint
+# runs/rgb/fcn-baseline/fcn/best.pt --run-name fcn-final
 # Add --validation-only to skip testing.
 #
 # For a quick check, add --epochs 1 --limit 8 --no-pretrained when training.
@@ -42,7 +48,7 @@
 # These are one-seed results at reduced resolution; FCN still needs comparing.
 # Some test images were inspected in the earlier small checks.
 #
-# Outputs go to runs/deeplab/<run-name>. Give each run a different name.
+# Outputs go to runs/rgb/<run-name>/<model>. Give each run a different name.
 # Scores in the saved files are fractions: 0.2599 means 25.99%.
 # Example images show RGB, correct labels, predictions and errors in red.
 # Black pixels in the label image are ignored. Masks are evaluated at 120 x 160
@@ -54,9 +60,10 @@
 # Sources:
 # TorchVision: https://docs.pytorch.org/vision/stable/models/deeplabv3.html
 # DeepLabV3 paper: https://arxiv.org/abs/1706.05587
+# FCN paper: https://arxiv.org/abs/1411.4038
 # NYU dataset: https://cs.nyu.edu/~fergus/datasets/nyu_depth_v2.html
 
-"""RGB-only DeepLabV3 training and evaluation for EGH444 Task 1."""
+"""RGB-only DeepLabV3 / FCN training and evaluation for EGH444 Task 1."""
 
 import argparse
 import os
@@ -80,6 +87,7 @@ if Path('/etc/ssl/cert.pem').is_file():
     os.environ.setdefault('SSL_CERT_FILE', '/etc/ssl/cert.pem')
 MEAN, STD = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
 CLASSES, IGNORE = 40, 255
+MODELS = {'deeplabv3': 'DeepLabV3', 'fcn': 'FCN'}
 
 
 # Dataset and preprocessing
@@ -136,7 +144,9 @@ class RGBDataset(Dataset):
 # Model and evaluation
 
 def build_model(name, pretrained):
-    """Set up DeepLabV3 with 40 output classes."""
+    """Set up DeepLabV3 or FCN (ResNet50) with 40 output classes."""
+    if name not in MODELS:
+        raise ValueError(f'Unknown model {name}; choose from {list(MODELS)}')
     constructor = getattr(torchvision.models.segmentation, f'{name}_resnet50')
     # Stop if the weights fail to download instead of using random weights.
     model = constructor(weights=None, weights_backbone='IMAGENET1K_V1' if pretrained else None,
@@ -225,14 +235,15 @@ def write_csv(path, rows):
             writer.writerows(rows)
 
 
-def write_results_text(run_dir, config, splits, results_dir, checkpoint, summary=None):
+def write_results_text(run_dir, config, splits, results_dir, checkpoint, model_name, summary=None):
     """Put the settings and results together for the group to read."""
     def percentage(value):
         return 'not available' if value is None else f'{100 * value:.2f}%'
 
-    lines = ['DeepLabV3 RGB results', '',
+    label = MODELS[model_name]
+    lines = [f'{label} RGB results', '',
              f'Run: {run_dir.name}', f'Checkpoint: {checkpoint}',
-             'Model: DeepLabV3 with a ResNet50 backbone; RGB only, 40 classes.',
+             f'Model: {label} with a ResNet50 backbone; RGB only, 40 classes.',
              f"Image size: {config['size'][0]} x {config['size'][1]} (height x width)",
              f"Seed: {config['seed']}; device: {config['device']}",
              'Split sizes: ' + ', '.join(f'{name}={len(ids)}' for name, ids in splits.items())]
@@ -279,7 +290,7 @@ def write_results_text(run_dir, config, splits, results_dir, checkpoint, summary
               '- Higher image resolution may help small objects; measure the extra time and memory.',
               '- Class weighting or a combined loss may help weaker classes; check class-wise scores.',
               'Test one change at a time against the baseline and select changes using validation results.']
-    (run_dir / 'deeplab_results.txt').write_text('\n'.join(lines) + '\n')
+    (run_dir / f'{model_name}_results.txt').write_text('\n'.join(lines) + '\n')
 
 
 # Training
@@ -390,7 +401,9 @@ def run_model(name, args, splits, device, run_dir):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--data-root', type=Path, required=True, help='Dataset folder containing RGB, Label, train.txt and test.txt')
-    parser.add_argument('--output-root', type=Path, default=Path('runs/deeplab'), help='Folder for generated runs')
+    parser.add_argument('--model', choices=list(MODELS), default='deeplabv3',
+                        help='Architecture to train (ignored with --evaluate-checkpoint; read from the checkpoint)')
+    parser.add_argument('--output-root', type=Path, default=Path('runs/rgb'), help='Folder for generated runs')
     parser.add_argument('--label-scheme', default='one-based', choices=['one-based', 'zero-based'],
                         help='one-based: IDs 1..40, ignore 0; zero-based: IDs 0..39')
     parser.add_argument('--pretrained', action=argparse.BooleanOptionalAction, default=True, help='Use ImageNet backbone weights; --no-pretrained disables')
@@ -470,20 +483,22 @@ def main():
         recorded_splits = json.loads(source_splits.read_text())
         if recorded_splits != splits:
             raise ValueError('Evaluation sample IDs differ from the selected training run. Use matching seed/data/limit.')
-        model = build_model('deeplabv3', False).to(device)
+        model_name = checkpoint.get('model', 'deeplabv3')
+        model = build_model(model_name, False).to(device)
         model.load_state_dict(checkpoint['model_state'])
+        print(f'Evaluating {MODELS[model_name]} checkpoint (epoch {checkpoint.get("epoch")})', flush=True)
         for split in (('val',) if args.validation_only else ('val', 'test')):
             dataset = RGBDataset(args.data_root, splits[split], args.size, args.label_scheme)
             loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
             result = evaluate(model, loader, device, run_dir / split, visual_count=12)
             print(f"{split}: mIoU={result['mIoU']:.4f}, PixelAcc={result['PixelAcc']:.4f}", flush=True)
         print(f'Final evaluation saved: {run_dir}')
-        write_results_text(run_dir, config, splits, run_dir, args.evaluate_checkpoint)
+        write_results_text(run_dir, config, splits, run_dir, args.evaluate_checkpoint, model_name)
         return
-    summary = run_model('deeplabv3', args, splits, device, run_dir)
+    summary = run_model(args.model, args, splits, device, run_dir)
     write_csv(run_dir / 'summary.csv', [summary])
-    write_results_text(run_dir, config, splits, run_dir / 'deeplabv3',
-                       run_dir / 'deeplabv3' / 'best.pt', summary)
+    write_results_text(run_dir, config, splits, run_dir / args.model,
+                       run_dir / args.model / 'best.pt', args.model, summary)
     print(f'Finished. Results: {run_dir}')
 
 
