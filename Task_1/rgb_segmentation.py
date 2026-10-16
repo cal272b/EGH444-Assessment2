@@ -262,7 +262,7 @@ def write_results_text(run_dir, config, splits, results_dir, checkpoint, model_n
                   f"Head learning rate: {training_config.get('lr')}; backbone multiplier: {training_config.get('backbone_lr_factor')}",
                   f"Trainable backbone: {training_config.get('trainable_backbone')}; schedule: {training_config.get('schedule')}",
                   f"Pretrained backbone: {training_config.get('pretrained')}",
-                  'Loss: cross-entropy; augmentation: random horizontal flips (50%).']
+                  f"Loss: {training_config.get('loss', 'ce')}; augmentation: random horizontal flips (50%)."]
     else:
         lines += ['', 'Original training config.json was unavailable; see the original run for training settings.']
     if summary:
@@ -294,6 +294,30 @@ def write_results_text(run_dir, config, splits, results_dir, checkpoint, model_n
 
 
 # Training
+
+def median_frequency_weights(args, train_stems):
+    """Median frequency balancing (Eigen & Fergus, ICCV 2015), from training labels only.
+
+    freq_c = pixels of class c / total pixels of images containing c;
+    weight_c = median(freq) / freq_c. Classes absent from training get weight 0.
+    Uses an unflipped dataset so the training RNG sequence matches the baseline.
+    """
+    dataset = RGBDataset(args.data_root, train_stems, args.size, args.label_scheme, training=False)
+    class_pixels = np.zeros(CLASSES, dtype=np.float64)
+    image_pixels = np.zeros(CLASSES, dtype=np.float64)
+    for _, mask, _ in dataset:
+        mask = mask.numpy()
+        valid = mask[mask != IGNORE]
+        counts = np.bincount(valid, minlength=CLASSES)
+        class_pixels += counts
+        image_pixels[counts > 0] += valid.size
+    present = class_pixels > 0
+    freq = np.zeros(CLASSES)
+    freq[present] = class_pixels[present] / image_pixels[present]
+    weights = np.zeros(CLASSES)
+    weights[present] = np.median(freq[present]) / freq[present]
+    return weights
+
 
 def run_model(name, args, splits, device, run_dir):
     """Train and keep the model with the best validation IoU."""
@@ -328,7 +352,14 @@ def run_model(name, args, splits, device, run_dir):
         if previous['label_scheme'] != args.label_scheme:
             raise ValueError('Checkpoint label mapping differs.')
         model.load_state_dict(previous['model_state'])
-    criterion = nn.CrossEntropyLoss(ignore_index=IGNORE)
+    weights = None
+    if args.loss == 'weighted-ce':
+        weights = median_frequency_weights(args, splits['train'])
+        (folder / 'class_weights.json').write_text(json.dumps(weights.tolist(), indent=2))
+        print('Median-frequency class weights: min {:.2f}, max {:.2f}'.format(
+            weights[weights > 0].min(), weights.max()), flush=True)
+        weights = torch.tensor(weights, dtype=torch.float32, device=device)
+    criterion = nn.CrossEntropyLoss(weight=weights, ignore_index=IGNORE)
     best, history, stale = -1.0, [], 0
     started = time.perf_counter()
     for epoch in range(1, args.epochs + 1):
@@ -416,6 +447,8 @@ def main():
     parser.add_argument('--backbone-lr-factor', type=float, default=0.1,
                         help='Multiplier on head LR for the pretrained backbone')
     parser.add_argument('--schedule', choices=['constant', 'poly'], default='poly')
+    parser.add_argument('--loss', choices=['ce', 'weighted-ce'], default='ce',
+                        help='weighted-ce: cross-entropy with median-frequency class weights')
     parser.add_argument('--patience', type=int, default=4, help='Early stopping patience; 0 disables')
     parser.add_argument('--resume', type=Path, help='Fine-tune from these model weights; starts a new optimiser')
     parser.add_argument('--final-test', action='store_true', help='Evaluate test after training; omit during tuning')
