@@ -88,6 +88,8 @@ if Path('/etc/ssl/cert.pem').is_file():
 MEAN, STD = (0.485, 0.456, 0.406), (0.229, 0.224, 0.225)
 CLASSES, IGNORE = 40, 255
 MODELS = {'deeplabv3': 'DeepLabV3', 'fcn': 'FCN'}
+DEPTH_MEAN, DEPTH_STD = 0.449, 0.226   # average of the ImageNet RGB statistics
+DEPTH_MODES = ('none', 'early', 'mid')
 
 
 # Dataset and preprocessing
@@ -103,10 +105,12 @@ def read_split(root, name):
 
 class RGBDataset(Dataset):
     """Load matching photos and label masks."""
-    def __init__(self, root, stems, size, label_scheme, training=False, label_size=None):
+    def __init__(self, root, stems, size, label_scheme, training=False, label_size=None, depth=False):
         # label_size lets evaluation score every model against the same mask resolution.
+        # depth=True appends the aligned depth map as a 4th input channel.
         self.root, self.stems, self.size = root, stems, size
         self.label_size = label_size or size
+        self.depth = depth
         self.label_scheme, self.training = label_scheme, training
         self.paths = []
         for stem in stems:
@@ -115,6 +119,8 @@ class RGBDataset(Dataset):
             mask = root / 'Label' / f'{stem}.png'
             if rgb is None or not mask.is_file():
                 raise FileNotFoundError(f'Missing RGB or label for {stem}')
+            if depth and not (root / 'Depth' / f'{stem}.png').is_file():
+                raise FileNotFoundError(f'Missing depth for {stem}')
             self.paths.append((rgb, mask))
 
     def __len__(self):
@@ -136,16 +142,77 @@ class RGBDataset(Dataset):
             if np.any(mask == 40):
                 raise ValueError('Found ID 40 with zero-based labels. Confirm label convention.')
             mask = np.where((mask >= 0) & (mask < CLASSES), mask, IGNORE)
-        # Flip the photo and mask together so they still line up.
+        depth = self.load_depth(self.stems[index]) if self.depth else None
+        # Flip the photo, depth and mask together so they still line up.
         if self.training and random.random() < 0.5:
             rgb = TF.hflip(rgb)
             mask = np.flip(mask, axis=1).copy()
-        return TF.normalize(TF.to_tensor(rgb), MEAN, STD), torch.from_numpy(mask.copy()), self.stems[index]
+            if depth is not None:
+                depth = np.flip(depth, axis=1).copy()
+        image = TF.normalize(TF.to_tensor(rgb), MEAN, STD)
+        if depth is not None:
+            image = torch.cat([image, torch.from_numpy(depth)[None]], 0)
+        return image, torch.from_numpy(mask.copy()), self.stems[index]
+
+    def load_depth(self, stem):
+        """Depth PNGs here are 8-bit, min-max normalised per image (0 = nearest, 255 = farthest),
+        stored as RGBA with identical colour channels, and already hole-filled (NYUv2 labelled set).
+        Resized with nearest-neighbour so depth edges aren't blurred across objects, scaled to
+        [0, 1], then standardised with the average ImageNet mean/std so it matches the RGB scale."""
+        arr = np.array(Image.open(self.root / 'Depth' / f'{stem}.png'))
+        if arr.ndim == 3:
+            if not np.array_equal(arr[..., 0], arr[..., 1]):
+                raise ValueError(f'Depth PNG {stem} has differing colour channels; expected greyscale depth.')
+            arr = arr[..., 0]
+        arr = np.array(Image.fromarray(arr).resize((self.size[1], self.size[0]), Image.Resampling.NEAREST))
+        return ((arr.astype(np.float32) / 255.0 - DEPTH_MEAN) / DEPTH_STD).astype(np.float32)
 
 
 # Model and evaluation
 
-def build_model(name, pretrained, aspp_rates=None):
+class MidFusion(nn.Module):
+    """RGB-D mid-level fusion (after FuseNet, Hazirbas et al. 2016, simplified to one fusion point).
+
+    A separate ImageNet ResNet18 encodes depth (replicated to 3 channels) up to layer2 (stride 8,
+    128 ch), matching the dilated ResNet50's stride-8 layer4 output. A 1x1 conv projects it to
+    2048 ch and it is ADDED to the RGB features before the unchanged segmentation head.
+    The projection is zero-initialised, so training starts from exactly the RGB-only model and
+    any change in behaviour is what the network learns to take from depth.
+    """
+    def __init__(self, base, pretrained):
+        super().__init__()
+        self.backbone, self.classifier = base.backbone, base.classifier
+        r18 = torchvision.models.resnet18(weights='IMAGENET1K_V1' if pretrained else None)
+        self.depth_encoder = nn.Sequential(r18.conv1, r18.bn1, r18.relu, r18.maxpool, r18.layer1, r18.layer2)
+        self.depth_proj = nn.Conv2d(128, 2048, kernel_size=1)
+        nn.init.zeros_(self.depth_proj.weight)
+        nn.init.zeros_(self.depth_proj.bias)
+
+    def forward(self, x):
+        size = x.shape[-2:]
+        rgb_features = self.backbone(x[:, :3])['out']
+        depth_features = self.depth_proj(self.depth_encoder(x[:, 3:].repeat(1, 3, 1, 1)))
+        if depth_features.shape[-2:] != rgb_features.shape[-2:]:
+            depth_features = nn.functional.interpolate(depth_features, size=rgb_features.shape[-2:],
+                                                       mode='bilinear', align_corners=False)
+        out = self.classifier(rgb_features + depth_features)
+        return {'out': nn.functional.interpolate(out, size=size, mode='bilinear', align_corners=False)}
+
+
+def add_early_fusion(model):
+    """Early fusion: widen the first conv to 4 input channels. RGB filters keep their ImageNet
+    weights; the depth filter starts as the mean of the RGB filters (a common initialisation,
+    e.g. Gupta et al. 2014 / Couprie et al. 2013 style RGB-D CNN inputs)."""
+    old = model.backbone.conv1
+    new = nn.Conv2d(4, old.out_channels, old.kernel_size, old.stride, old.padding, bias=False)
+    with torch.no_grad():
+        new.weight[:, :3] = old.weight
+        new.weight[:, 3:] = old.weight.mean(1, keepdim=True)
+    model.backbone.conv1 = new
+    return model
+
+
+def build_model(name, pretrained, aspp_rates=None, depth='none'):
     """Set up DeepLabV3 or FCN (ResNet50) with 40 output classes.
 
     aspp_rates replaces DeepLabV3's default atrous rates (12, 24, 36), which are
@@ -162,6 +229,10 @@ def build_model(name, pretrained, aspp_rates=None):
             raise ValueError('--aspp-rates only applies to deeplabv3')
         from torchvision.models.segmentation.deeplabv3 import DeepLabHead
         model.classifier = DeepLabHead(2048, CLASSES, atrous_rates=tuple(aspp_rates))
+    if depth == 'early':
+        model = add_early_fusion(model)
+    elif depth == 'mid':
+        model = MidFusion(model, pretrained)
     return model
 
 
@@ -190,7 +261,7 @@ def save_visual(rgb, target, prediction, path):
         return out
     mean = torch.tensor(MEAN)[:, None, None]
     std = torch.tensor(STD)[:, None, None]
-    image = ((rgb.cpu() * std + mean).clamp(0, 1).permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+    image = ((rgb[:3].cpu() * std + mean).clamp(0, 1).permute(1, 2, 0).numpy() * 255).astype(np.uint8)
     if image.shape[:2] != target.shape:
         image = np.array(Image.fromarray(image).resize((target.shape[1], target.shape[0]), Image.Resampling.BILINEAR))
     error = np.zeros_like(image)
@@ -254,7 +325,7 @@ def evaluate(model, loader, device, output=None, visual_count=6):
             boundary_counts += [(correct & band).sum(), (valid & band).sum(),
                                 (correct & ~band).sum(), (valid & ~band).sum()]
             # Scene descriptors for failure analysis: brightness (0-1) and clutter (distinct classes).
-            rgb = images[i].cpu() * torch.tensor(STD)[:, None, None] + torch.tensor(MEAN)[:, None, None]
+            rgb = images[i, :3].cpu() * torch.tensor(STD)[:, None, None] + torch.tensor(MEAN)[:, None, None]
             rows.append({'id': sid, 'mIoU': result['mIoU'], 'PixelAcc': result['PixelAcc'],
                          'boundary_PixelAcc': float((correct & band).sum() / max((valid & band).sum(), 1)),
                          'brightness': float(rgb.clamp(0, 1).mean()),
@@ -312,6 +383,7 @@ def write_results_text(run_dir, config, splits, results_dir, checkpoint, model_n
                   f"Head learning rate: {training_config.get('lr')}; backbone multiplier: {training_config.get('backbone_lr_factor')}",
                   f"Trainable backbone: {training_config.get('trainable_backbone')}; schedule: {training_config.get('schedule')}",
                   f"Pretrained backbone: {training_config.get('pretrained')}",
+                  f"Depth fusion: {training_config.get('depth', 'none')}",
                   f"Loss: {training_config.get('loss', 'ce')}; augmentation: random horizontal flips (50%)."]
     else:
         lines += ['', 'Original training config.json was unavailable; see the original run for training settings.']
@@ -383,19 +455,25 @@ def run_model(name, args, splits, device, run_dir):
     loaders = {}
     for split, stems in splits.items():
         dataset = RGBDataset(args.data_root, stems, args.size, args.label_scheme, split == 'train',
-                             label_size=args.size if split == 'train' else args.eval_size)
+                             label_size=args.size if split == 'train' else args.eval_size,
+                             depth=args.depth != 'none')
         loaders[split] = DataLoader(dataset, batch_size=args.batch_size, shuffle=split == 'train',
                                     num_workers=0, generator=torch.Generator().manual_seed(args.seed))
-    model = build_model(name, args.pretrained, args.aspp_rates).to(device)
+    model = build_model(name, args.pretrained, args.aspp_rates, args.depth).to(device)
     if args.trainable_backbone == 'frozen':
         for parameter in model.backbone.parameters():
             parameter.requires_grad_(False)
     elif args.trainable_backbone == 'last-stage':
         for key, parameter in model.backbone.named_parameters():
-            parameter.requires_grad_(key.startswith('layer4.'))
+            # Early fusion also trains conv1, otherwise the new depth filters could never learn.
+            parameter.requires_grad_(key.startswith('layer4.') or (args.depth == 'early' and key == 'conv1.weight'))
     optimizer = torch.optim.AdamW([
         {'params': [p for p in model.backbone.parameters() if p.requires_grad], 'lr': args.lr * args.backbone_lr_factor},
         {'params': model.classifier.parameters(), 'lr': args.lr}], weight_decay=1e-4)
+    if args.depth == 'mid':
+        # The depth branch must move from RGB (ImageNet) features to depth, so it trains at the head LR.
+        optimizer.add_param_group({'params': list(model.depth_encoder.parameters()) + list(model.depth_proj.parameters()),
+                                   'lr': args.lr, 'weight_decay': 1e-4})
     scheduler = (torch.optim.lr_scheduler.LambdaLR(optimizer, lambda epoch: (1 - epoch / args.epochs) ** 0.9)
                  if args.schedule == 'poly' else None)
     if args.resume:
@@ -417,7 +495,10 @@ def run_model(name, args, splits, device, run_dir):
         epoch_start = time.perf_counter()
         model.train()
         # Keep the pretrained backbone's BatchNorm statistics fixed.
-        for layer in model.backbone.modules():
+        frozen_bn = list(model.backbone.modules())
+        if args.depth == 'mid':
+            frozen_bn += list(model.depth_encoder.modules())   # batch size 2 is too small for BN statistics
+        for layer in frozen_bn:
             if isinstance(layer, nn.modules.batchnorm._BatchNorm):
                 layer.eval()
         total_loss, batches = 0.0, 0
@@ -455,7 +536,7 @@ def run_model(name, args, splits, device, run_dir):
             best = validation['mIoU']
             torch.save({'model_state': model.state_dict(), 'epoch': epoch, 'model': name, 'num_classes': CLASSES,
                         'label_scheme': args.label_scheme, 'size': args.size,
-                        'val_mIoU': best, 'aspp_rates': args.aspp_rates}, folder / 'best.pt')
+                        'val_mIoU': best, 'aspp_rates': args.aspp_rates, 'depth': args.depth}, folder / 'best.pt')
         else:
             stale += 1
         if scheduler:
@@ -501,6 +582,8 @@ def main():
     parser.add_argument('--schedule', choices=['constant', 'poly'], default='poly')
     parser.add_argument('--aspp-rates', type=int, nargs=3, metavar=('R1', 'R2', 'R3'),
                         help='DeepLabV3 only: replace default atrous rates 12 24 36')
+    parser.add_argument('--depth', choices=DEPTH_MODES, default='none',
+                        help='none: RGB only; early: depth as 4th input channel; mid: separate depth encoder fused before the head')
     parser.add_argument('--loss', choices=['ce', 'weighted-ce'], default='ce',
                         help='weighted-ce: cross-entropy with median-frequency class weights')
     parser.add_argument('--patience', type=int, default=4, help='Early stopping patience; 0 disables')
@@ -579,11 +662,13 @@ def main():
         if recorded_splits != splits:
             raise ValueError('Evaluation sample IDs differ from the selected training run. Use matching seed/data/limit.')
         model_name = checkpoint.get('model', 'deeplabv3')
-        model = build_model(model_name, False, checkpoint.get('aspp_rates')).to(device)
+        depth_mode = checkpoint.get('depth', 'none')
+        model = build_model(model_name, False, checkpoint.get('aspp_rates'), depth_mode).to(device)
         model.load_state_dict(checkpoint['model_state'])
-        print(f'Evaluating {MODELS[model_name]} checkpoint (epoch {checkpoint.get("epoch")})', flush=True)
+        print(f'Evaluating {MODELS[model_name]} checkpoint (epoch {checkpoint.get("epoch")}, depth: {depth_mode})', flush=True)
         for split in (('val',) if args.validation_only else ('val', 'test')):
-            dataset = RGBDataset(args.data_root, splits[split], args.size, args.label_scheme, label_size=args.eval_size)
+            dataset = RGBDataset(args.data_root, splits[split], args.size, args.label_scheme,
+                                 label_size=args.eval_size, depth=depth_mode != 'none')
             loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
             result = evaluate(model, loader, device, run_dir / split, visual_count=12)
             print(f"{split}: mIoU={result['mIoU']:.4f}, PixelAcc={result['PixelAcc']:.4f}", flush=True)

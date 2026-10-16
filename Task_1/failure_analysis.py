@@ -80,7 +80,29 @@ def worst_images(eval_dir, split='test', n=8):
     return f.sort_values('mIoU').head(n)
 
 
-def show_examples(runs, ids, data_root, split='test', title=None):
+def per_image_delta(base_dir, other_dir, split='test'):
+    """Per-image mIoU change (other - base), sorted from most helped to most hurt."""
+    a = pd.read_csv(Path(base_dir) / split / 'per_image.csv')
+    b = pd.read_csv(Path(other_dir) / split / 'per_image.csv')
+    m = a.merge(b, on='id', suffixes=('_base', '_other'))
+    m['delta_mIoU_points'] = 100 * (m['mIoU_other'] - m['mIoU_base'])
+    keep = ['id', 'mIoU_base', 'mIoU_other', 'delta_mIoU_points', 'brightness_base', 'num_classes_base']
+    return m[[c for c in keep if c in m]].sort_values('delta_mIoU_points', ascending=False).reset_index(drop=True)
+
+
+def confusion_change(base_dir, other_dir, pairs, split='test'):
+    """How often each (true, predicted) confusion happens before and after, as % of the true class's pixels."""
+    rows = []
+    cms = [np.load(Path(d) / split / 'confusion_matrix.npy').astype(float) for d in (base_dir, other_dir)]
+    for true, pred in pairs:
+        t, p = NYU40.index(true), NYU40.index(pred)
+        before, after = (100 * cm[t, p] / max(cm[t].sum(), 1) for cm in cms)
+        rows.append({'true': true, 'predicted_as': pred, 'before_%': round(before, 1),
+                     'after_%': round(after, 1), 'change_points': round(after - before, 1)})
+    return pd.DataFrame(rows)
+
+
+def show_examples(runs, ids, data_root, split='test', title=None, show_depth=False):
     """Plot RGB | ground truth | each model's prediction for chosen image IDs (any image, not just the first 12)."""
     import matplotlib.pyplot as plt
     from PIL import Image
@@ -94,7 +116,8 @@ def show_examples(runs, ids, data_root, split='test', title=None):
         out[ok] = palette[mask[ok]]
         return out
 
-    fig, axes = plt.subplots(len(ids), 2 + len(names), figsize=(2.6 * (2 + len(names)), 2.1 * len(ids)), squeeze=False)
+    cols = 2 + len(names) + int(show_depth)
+    fig, axes = plt.subplots(len(ids), cols, figsize=(2.6 * cols, 2.1 * len(ids)), squeeze=False)
     for r, sid in enumerate(ids):
         sid = str(sid)
         pred0 = preds[names[0]][sid]
@@ -104,7 +127,12 @@ def show_examples(runs, ids, data_root, split='test', title=None):
         rgb = np.array(Image.open(rgb_path).convert('RGB').resize((w, h), Image.Resampling.BILINEAR))
         label = np.array(Image.open(root / 'Label' / f'{sid}.png').resize((w, h), Image.Resampling.NEAREST)).astype(int)
         gt = np.where((label >= 1) & (label <= 40), label - 1, 255)
-        panels = [('RGB', rgb), ('Ground truth', colour(gt))] + [(n, colour(preds[n][sid])) for n in names]
+        panels = [('RGB', rgb)]
+        if show_depth:
+            d = np.array(Image.open(root / 'Depth' / f'{sid}.png'))
+            d = d[..., 0] if d.ndim == 3 else d
+            panels.append(('Depth', plt.cm.turbo(np.array(Image.fromarray(d).resize((w, h), Image.Resampling.NEAREST)) / 255.0)))
+        panels += [('Ground truth', colour(gt))] + [(n, colour(preds[n][sid])) for n in names]
         for c, (name, img) in enumerate(panels):
             ax = axes[r, c]
             ax.imshow(img)

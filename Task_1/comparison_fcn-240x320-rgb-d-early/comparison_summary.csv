@@ -1,0 +1,5 @@
+split,model,mIoU_%,PixelAcc_%,mean_Dice_F1_%,boundary_PixelAcc_%,interior_PixelAcc_%,inference_ms_per_image,params_M
+val,FCN 240x320,0.27,2.55,0.52,2.55,0.0,593.94,32.97
+val,FCN 240x320 RGB-D early,0.31,2.48,0.62,2.48,0.0,422.1,32.97
+test,FCN 240x320,0.27,2.49,0.53,2.49,0.0,426.12,32.97
+test,FCN 240x320 RGB-D early,0.32,2.52,0.63,2.52,0.0,468.59,32.97

@@ -54,7 +54,23 @@ def _check_same_protocol(runs):
 
 
 def _parameter_counts(runs):
-    """Count parameters by rebuilding each architecture (no weights needed)."""
+    """Count trainable-weight parameters from each evaluated checkpoint (includes any depth branch)."""
+    try:
+        import torch
+        counts = {}
+        for name, run_dir in runs.items():
+            ckpt = json.loads((Path(run_dir) / 'config.json').read_text()).get('evaluate_checkpoint')
+            state = torch.load(ckpt, map_location='cpu', weights_only=True)['model_state']
+            counts[name] = sum(v.numel() for k, v in state.items()
+                               if 'running_' not in k and 'num_batches' not in k) / 1e6
+        return counts
+    except Exception:
+        pass
+    return _parameter_counts_by_rebuild(runs)
+
+
+def _parameter_counts_by_rebuild(runs):
+    """Fallback: count parameters by rebuilding each architecture (no weights needed)."""
     try:
         from rgb_segmentation import build_model
     except ImportError:
