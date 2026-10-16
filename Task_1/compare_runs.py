@@ -45,11 +45,12 @@ def _check_same_protocol(runs):
     for name, run_dir in runs.items():
         config = json.loads((Path(run_dir) / 'config.json').read_text())
         splits = json.loads((Path(run_dir) / 'splits.json').read_text())
-        key = (json.dumps(splits, sort_keys=True), tuple(config['size']), config['label_scheme'])
+        eval_size = config.get('eval_size') or config['size']
+        key = (json.dumps(splits, sort_keys=True), tuple(eval_size), config['label_scheme'])
         if reference is None:
             reference = (name, key)
         elif key != reference[1]:
-            raise ValueError(f'{name} was evaluated with different splits/size/labels from {reference[0]}.')
+            raise ValueError(f'{name} was evaluated with different splits/eval size/labels from {reference[0]}.')
 
 
 def _parameter_counts(runs):
@@ -88,6 +89,8 @@ def compare(runs, out_dir, splits=('val', 'test'), qualitative_count=4):
                             'mIoU_%': round(100 * m['mIoU'], 2),
                             'PixelAcc_%': round(100 * m['PixelAcc'], 2),
                             'mean_Dice_F1_%': round(100 * m['mean_Dice_F1'], 2),
+                            'boundary_PixelAcc_%': round(100 * m['boundary_PixelAcc'], 2) if 'boundary_PixelAcc' in m else '',
+                            'interior_PixelAcc_%': round(100 * m['interior_PixelAcc'], 2) if 'interior_PixelAcc' in m else '',
                             'inference_ms_per_image': round(m['inference_ms_per_image'], 2),
                             'params_M': round(params[n], 2) if n in params else ''})
 

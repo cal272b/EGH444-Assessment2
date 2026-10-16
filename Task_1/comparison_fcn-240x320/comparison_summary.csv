@@ -1,0 +1,5 @@
+split,model,mIoU_%,PixelAcc_%,mean_Dice_F1_%,boundary_PixelAcc_%,interior_PixelAcc_%,inference_ms_per_image,params_M
+val,FCN @240 labels,0.29,2.54,0.56,2.54,0.0,209.0,32.97
+val,FCN 240x320,0.27,2.55,0.52,2.55,0.0,510.98,32.97
+test,FCN @240 labels,0.28,2.55,0.55,2.55,0.0,180.47,32.97
+test,FCN 240x320,0.27,2.49,0.53,2.49,0.0,495.12,32.97

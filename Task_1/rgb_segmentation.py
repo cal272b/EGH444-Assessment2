@@ -103,8 +103,10 @@ def read_split(root, name):
 
 class RGBDataset(Dataset):
     """Load matching photos and label masks."""
-    def __init__(self, root, stems, size, label_scheme, training=False):
+    def __init__(self, root, stems, size, label_scheme, training=False, label_size=None):
+        # label_size lets evaluation score every model against the same mask resolution.
         self.root, self.stems, self.size = root, stems, size
+        self.label_size = label_size or size
         self.label_scheme, self.training = label_scheme, training
         self.paths = []
         for stem in stems:
@@ -123,7 +125,7 @@ class RGBDataset(Dataset):
         with Image.open(rp) as image:
             rgb = image.convert('RGB').resize((self.size[1], self.size[0]), Image.Resampling.BILINEAR)
         with Image.open(lp) as image:
-            mask = np.array(image.resize((self.size[1], self.size[0]), Image.Resampling.NEAREST), dtype=np.int64)
+            mask = np.array(image.resize((self.label_size[1], self.label_size[0]), Image.Resampling.NEAREST), dtype=np.int64)
         if mask.ndim != 2:
             raise ValueError(f'Expected a single-channel class-ID mask: {lp}')
         # Ignore unlabeled pixels and shift the class IDs to start at zero.
@@ -189,9 +191,28 @@ def save_visual(rgb, target, prediction, path):
     mean = torch.tensor(MEAN)[:, None, None]
     std = torch.tensor(STD)[:, None, None]
     image = ((rgb.cpu() * std + mean).clamp(0, 1).permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+    if image.shape[:2] != target.shape:
+        image = np.array(Image.fromarray(image).resize((target.shape[1], target.shape[0]), Image.Resampling.BILINEAR))
     error = np.zeros_like(image)
     error[(target != IGNORE) & (target != prediction)] = (255, 0, 0)
     Image.fromarray(np.concatenate([image, colour(target), colour(prediction), error], axis=1)).save(path)
+
+
+def boundary_band(target):
+    """Pixels within a few pixels of a class edge in the ground truth (width scales with image height)."""
+    edge = np.zeros(target.shape, dtype=bool)
+    edge[1:, :] |= target[1:, :] != target[:-1, :]
+    edge[:-1, :] |= target[1:, :] != target[:-1, :]
+    edge[:, 1:] |= target[:, 1:] != target[:, :-1]
+    edge[:, :-1] |= target[:, 1:] != target[:, :-1]
+    for _ in range(max(1, target.shape[0] // 60)):
+        grown = edge.copy()
+        grown[1:, :] |= edge[:-1, :]
+        grown[:-1, :] |= edge[1:, :]
+        grown[:, 1:] |= edge[:, :-1]
+        grown[:, :-1] |= edge[:, 1:]
+        edge = grown
+    return edge
 
 
 @torch.no_grad()
@@ -199,6 +220,8 @@ def evaluate(model, loader, device, output=None, visual_count=6):
     model.eval()
     cm = np.zeros((CLASSES, CLASSES), dtype=np.int64)
     rows, elapsed, samples = [], 0.0, 0
+    boundary_counts = np.zeros(4, dtype=np.int64)   # correct/total near edges, correct/total interior
+    stored = {}                                     # every prediction, so any image can be visualised later
     if output:
         output.mkdir(parents=True, exist_ok=True)
     for images, targets, ids in loader:
@@ -208,7 +231,10 @@ def evaluate(model, loader, device, output=None, visual_count=6):
         elif device.type == 'mps':
             torch.mps.synchronize()
         start = time.perf_counter()
-        predictions = model(images)['out'].argmax(1)
+        logits = model(images)['out']
+        if logits.shape[-2:] != targets.shape[-2:]:
+            logits = nn.functional.interpolate(logits, size=targets.shape[-2:], mode='bilinear', align_corners=False)
+        predictions = logits.argmax(1)
         if device.type == 'cuda':
             torch.cuda.synchronize()
         elif device.type == 'mps':
@@ -223,14 +249,29 @@ def evaluate(model, loader, device, output=None, visual_count=6):
                                 minlength=CLASSES ** 2).reshape(CLASSES, CLASSES)
             cm += local
             result = metrics_from_confusion(local)
-            rows.append({'id': sid, 'mIoU': result['mIoU'], 'PixelAcc': result['PixelAcc']})
+            band = boundary_band(target)
+            correct = (target == prediction) & valid
+            boundary_counts += [(correct & band).sum(), (valid & band).sum(),
+                                (correct & ~band).sum(), (valid & ~band).sum()]
+            # Scene descriptors for failure analysis: brightness (0-1) and clutter (distinct classes).
+            rgb = images[i].cpu() * torch.tensor(STD)[:, None, None] + torch.tensor(MEAN)[:, None, None]
+            rows.append({'id': sid, 'mIoU': result['mIoU'], 'PixelAcc': result['PixelAcc'],
+                         'boundary_PixelAcc': float((correct & band).sum() / max((valid & band).sum(), 1)),
+                         'brightness': float(rgb.clamp(0, 1).mean()),
+                         'num_classes': int(len(np.unique(target[valid]))),
+                         'labelled_fraction': float(valid.mean())})
+            stored[str(sid)] = prediction.astype(np.uint8)
             if output and samples < visual_count:
                 save_visual(images[i], target, prediction, output / f'{sid}.png')
             samples += 1
     result = metrics_from_confusion(cm)
     result['inference_ms_per_image'] = 1000 * elapsed / max(samples, 1)
+    result['boundary_PixelAcc'] = float(boundary_counts[0] / max(boundary_counts[1], 1))
+    result['interior_PixelAcc'] = float(boundary_counts[2] / max(boundary_counts[3], 1))
+    result['eval_size'] = list(targets.shape[-2:]) if samples else None
     if output:
         np.save(output / 'confusion_matrix.npy', cm)
+        np.savez_compressed(output / 'predictions.npz', **stored)
         write_csv(output / 'per_image.csv', rows)
         (output / 'metrics.json').write_text(json.dumps(result, indent=2, allow_nan=False))
     return result
@@ -341,7 +382,8 @@ def run_model(name, args, splits, device, run_dir):
     folder.mkdir()
     loaders = {}
     for split, stems in splits.items():
-        dataset = RGBDataset(args.data_root, stems, args.size, args.label_scheme, split == 'train')
+        dataset = RGBDataset(args.data_root, stems, args.size, args.label_scheme, split == 'train',
+                             label_size=args.size if split == 'train' else args.eval_size)
         loaders[split] = DataLoader(dataset, batch_size=args.batch_size, shuffle=split == 'train',
                                     num_workers=0, generator=torch.Generator().manual_seed(args.seed))
     model = build_model(name, args.pretrained, args.aspp_rates).to(device)
@@ -402,7 +444,8 @@ def run_model(name, args, splits, device, run_dir):
             raise ValueError('No valid validation labels found.')
         row = {'epoch': epoch, 'train_loss': total_loss / batches,
                'val_mIoU': validation['mIoU'], 'val_PixelAcc': validation['PixelAcc'],
-               'epoch_seconds': time.perf_counter() - epoch_start, 'head_lr': optimizer.param_groups[1]['lr']}
+               'epoch_seconds': time.perf_counter() - epoch_start, 'head_lr': optimizer.param_groups[1]['lr'],
+               'peak_gpu_MB': torch.cuda.max_memory_allocated() / 2**20 if device.type == 'cuda' else None}
         history.append(row)
         write_csv(folder / 'training.csv', history)
         print(f"{name}: epoch {epoch}/{args.epochs}, loss={row['train_loss']:.4f}, val mIoU={row['val_mIoU']:.4f}", flush=True)
@@ -465,7 +508,10 @@ def main():
     parser.add_argument('--final-test', action='store_true', help='Evaluate test after training; omit during tuning')
     parser.add_argument('--validation-only', action='store_true', help='Skip test during checkpoint evaluation')
     parser.add_argument('--evaluate-checkpoint', type=Path, help='Evaluate selected checkpoint without training')
-    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--seed', type=int, default=42, help='Training seed (initialisation, shuffling, flips)')
+    parser.add_argument('--split-seed', type=int, help='Seed for the train/val split (default: --seed)')
+    parser.add_argument('--eval-size', type=int, nargs=2, metavar=('H', 'W'),
+                        help='Label resolution for val/test scoring; predictions are upsampled to it (default: --size)')
     parser.add_argument('--val-fraction', type=float, default=0.2)
     parser.add_argument('--device', choices=['auto', 'cpu', 'cuda', 'mps'], default='auto')
     parser.add_argument('--limit', type=int, help='Limit each split for pipeline checks only')
@@ -488,7 +534,8 @@ def main():
     if len(training) < 2 or not test:
         raise ValueError('Need at least two training samples and one test sample.')
     # Use the same split each time when the seed stays the same.
-    random.Random(args.seed).shuffle(training)
+    # The split has its own seed so extra training seeds keep identical train/val/test samples.
+    random.Random(args.seed if args.split_seed is None else args.split_seed).shuffle(training)
     count = min(len(training) - 1, max(1, round(len(training) * args.val_fraction)))
     splits = {'train': training[count:], 'val': training[:count], 'test': test}
     if args.limit:
@@ -497,6 +544,10 @@ def main():
     if selected == 'auto':
         selected = 'cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu')
     device = torch.device(selected)
+    if args.evaluate_checkpoint:
+        # The model's input size comes from the checkpoint; --eval-size only sets the label resolution.
+        args.size = list(torch.load(args.evaluate_checkpoint, map_location='cpu', weights_only=True)['size'])
+    args.eval_size = list(args.eval_size or args.size)
     run_dir = args.output_root / args.run_name
     run_dir.mkdir(parents=True, exist_ok=False)
     config = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
@@ -532,7 +583,7 @@ def main():
         model.load_state_dict(checkpoint['model_state'])
         print(f'Evaluating {MODELS[model_name]} checkpoint (epoch {checkpoint.get("epoch")})', flush=True)
         for split in (('val',) if args.validation_only else ('val', 'test')):
-            dataset = RGBDataset(args.data_root, splits[split], args.size, args.label_scheme)
+            dataset = RGBDataset(args.data_root, splits[split], args.size, args.label_scheme, label_size=args.eval_size)
             loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
             result = evaluate(model, loader, device, run_dir / split, visual_count=12)
             print(f"{split}: mIoU={result['mIoU']:.4f}, PixelAcc={result['PixelAcc']:.4f}", flush=True)

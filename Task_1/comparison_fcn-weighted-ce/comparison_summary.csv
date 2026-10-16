@@ -1,0 +1,5 @@
+split,model,mIoU_%,PixelAcc_%,mean_Dice_F1_%,boundary_PixelAcc_%,interior_PixelAcc_%,inference_ms_per_image,params_M
+val,FCN,0.28,2.56,0.56,2.56,0.0,172.56,32.97
+val,FCN weighted-CE,0.26,2.53,0.52,2.53,0.0,212.1,32.97
+test,FCN,0.27,2.51,0.54,2.51,0.0,160.94,32.97
+test,FCN weighted-CE,0.27,2.52,0.53,2.52,0.0,168.73,32.97

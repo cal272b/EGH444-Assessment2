@@ -1,0 +1,5 @@
+split,model,mIoU_%,PixelAcc_%,mean_Dice_F1_%,boundary_PixelAcc_%,interior_PixelAcc_%,inference_ms_per_image,params_M
+val,DeepLabV3,0.14,2.61,0.28,2.61,0.0,199.02,39.64
+val,DeepLabV3 ASPP 3-6-9,0.21,2.49,0.4,2.49,0.0,179.44,39.64
+test,DeepLabV3,0.13,2.59,0.26,2.59,0.0,170.93,39.64
+test,DeepLabV3 ASPP 3-6-9,0.21,2.53,0.41,2.53,0.0,182.12,39.64
